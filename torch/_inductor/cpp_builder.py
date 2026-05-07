@@ -2439,12 +2439,14 @@ class CppBuilder:
                     cmd += f" /LD /link {libraries_dirs_args} {libraries_args} {ldflags_args}"
                 cmd = normalize_path_separator(cmd)
             else:
+                extra_cflags = os.getenv("AOTI_EXTRA_CFLAGS", "")
                 cmd = (
-                    f"{compiler} {sources} {definitions_args} {cflags_args} "
+                    f"{compiler} {sources} {definitions_args} {extra_cflags} {cflags_args} "
                     f"{include_dirs_args} {passthrough_args} {output}"
                 )
                 if self._do_link:
-                    cmd += f" {ldflags_args} {libraries_args} {libraries_dirs_args}"
+                    extra_ldflags = os.getenv("AOTI_EXTRA_LDFLAGS", "")
+                    cmd += f" {extra_ldflags} {ldflags_args} {libraries_args} {libraries_dirs_args}"
             return cmd
 
         command_line = format_build_command(

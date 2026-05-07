@@ -7,6 +7,7 @@ import functools
 import itertools
 import logging
 import operator
+import os
 import textwrap
 import traceback
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
@@ -9259,6 +9260,19 @@ class FallbackKernel(ExternKernelAlloc):
             )
 
         self.codegen_comment(wrapper)
+
+        # Allow custom backends to opt into direct dispatch by operator prefix.
+        force_direct_prefixes = os.environ.get("TORCHINDUCTOR_DIRECT_DISPATCH_PREFIXES", "")
+        if force_direct_prefixes and isinstance(kernel, torch._ops.OpOverload):
+            prefix_list = [p.strip() for p in force_direct_prefixes.split(",") if p.strip()]
+            kernel_str = str(kernel)
+            if any(kernel_str.startswith(prefix) for prefix in prefix_list):
+                self.use_runtime_dispatch = False
+                log.info(
+                    "Forcing direct dispatch for %s (matched prefix from env)",
+                    kernel_str,
+                )
+
         if self.use_runtime_dispatch:
             exported_args = self.export_extern_kernel_node()
             assert self.python_kernel_name is not None
