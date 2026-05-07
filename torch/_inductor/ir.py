@@ -8101,6 +8101,23 @@ class FallbackKernel(ExternKernelAlloc):
             )
 
         self.codegen_comment(wrapper)
+
+        # 环境变量覆盖：强制让某些前缀的算子走直接代码生成（不走运行时派发）
+        force_direct_prefixes = os.environ.get(
+            "TORCHINDUCTOR_DIRECT_DISPATCH_PREFIXES", ""
+        )
+        if force_direct_prefixes and isinstance(kernel, torch._ops.OpOverload):
+            prefix_list = [
+                p.strip() for p in force_direct_prefixes.split(",") if p.strip()
+            ]
+            kernel_str = str(kernel)
+            if any(kernel_str.startswith(prefix) for prefix in prefix_list):
+                self.use_runtime_dispatch = False
+                log.info(
+                    "Forcing direct dispatch for %s (matched prefix from env)",
+                    kernel_str,
+                )
+
         if self.use_runtime_dispatch:
             exported_args = self.export_extern_kernel_node()
             assert self.python_kernel_name is not None
