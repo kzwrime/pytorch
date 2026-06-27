@@ -292,7 +292,6 @@ class CppWrapperCpu(PythonWrapperCodegen):
         self.used_cond_predicate: OrderedSet[str] = OrderedSet()
         self.cached_output_id = count()
         self.scalar_to_tensor_id = count()
-        self.custom_op_wrapper_loaded = False
         # For GEMM kernels that must be initialized and are resolved at linking.
         self.initialized_kernels: dict[str, Kernel] = {}
         self.device_codegen = get_device_op_overrides(self.device)
@@ -3083,27 +3082,26 @@ class CppWrapperCpu(PythonWrapperCodegen):
         return scoped_lines._lines
 
     def load_custom_op_wrapper(self):
-        # TODO: need to support control flow
-        if self.custom_op_wrapper_loaded:
-            return
+        # Each fallback needs a unique handle in its own control-flow scope.
+        custom_op_wrapper_var = f"custom_op_wrapper_{next(self.arg_var_id)}"
 
-        lines = """
+        lines = f"""
 RAIIPyObject codecache_module(PyImport_ImportModule("torch._inductor.codecache"));
-if (!codecache_module) {
+if (!codecache_module) {{
     throw std::runtime_error("Failed to load torch._inductor.codecache");
-}
-custom_op_wrapper = PyObject_GetAttrString(codecache_module, "custom_op_wrapper");
-if (!custom_op_wrapper) {
+}}
+{custom_op_wrapper_var} = PyObject_GetAttrString(codecache_module, "custom_op_wrapper");
+if (!{custom_op_wrapper_var}) {{
     throw std::runtime_error("Failed to load torch._inductor.codecache.custom_op_wrapper");
-}"""
+}}"""
 
-        declarations_before_scope = ["RAIIPyObject custom_op_wrapper;"]
+        declarations_before_scope = [f"RAIIPyObject {custom_op_wrapper_var};"]
         scope_gil_acquire = self.generate_scoped_gil_acquire(
             declarations_before_scope, lines
         )
         self.writelines(scope_gil_acquire)
 
-        self.custom_op_wrapper_loaded = True
+        return custom_op_wrapper_var
 
     def generate_float_value(self, val):
         assert isinstance(val, float)
@@ -3592,7 +3590,7 @@ if (!custom_op_wrapper) {
 
         This function calls into Python to dispatch, which allows it to handle datatypes
         that cannot be contained in StableIValue, at the cost of some performance."""
-        self.load_custom_op_wrapper()
+        custom_op_wrapper_var = self.load_custom_op_wrapper()
 
         num_args = len(raw_args)
         py_args_var = f"py_args_{next(self.arg_var_id)}"
@@ -3617,7 +3615,7 @@ if (!custom_op_wrapper) {
         lines += textwrap.dedent(
             f"""
             // Call the custom op in Python
-            RAIIPyObject py_{buf_name}(PyObject_CallObject(custom_op_wrapper, {py_args_var}));
+            RAIIPyObject py_{buf_name}(PyObject_CallObject({custom_op_wrapper_var}, {py_args_var}));
             if (!py_{buf_name}) {{
                 if (PyErr_Occurred()) {{
                     return;
