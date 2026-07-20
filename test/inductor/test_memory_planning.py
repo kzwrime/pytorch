@@ -1,7 +1,10 @@
 # Owner(s): ["module: inductor"]
 
+import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from torch.testing._internal.common_utils import IS_CI, IS_WINDOWS
 from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_GPU, requires_gpu
@@ -19,6 +22,7 @@ import torch
 from torch._C import FileCheck
 from torch._dynamo.utils import same
 from torch._inductor import config
+from torch._inductor.codegen.wrapper import AllocateLine
 from torch._inductor.test_case import run_tests, TestCase
 from torch._inductor.utils import run_and_get_cpp_code
 from torch.export import Dim
@@ -30,6 +34,24 @@ except ImportError:
     from test_aot_inductor import (  # @manual=fbcode//caffe2/test/inductor:test_aot_inductor-library
         AOTIRunnerUtil,
     )
+
+
+class TestBufferReusePolicy(TestCase):
+    def test_aoti_torch_always_reuse(self):
+        allocate = object.__new__(AllocateLine)
+        allocate.comm_buffer = False
+        allocate.scheduler_node_index = 10
+        allocate.wrapper = SimpleNamespace(
+            estimate_peak=SimpleNamespace(
+                overall_peak_memory=100,
+                peak_between=lambda free_line, allocate_line: 100,
+            )
+        )
+        free_line = SimpleNamespace(scheduler_node_index=0)
+
+        self.assertFalse(allocate.should_reuse_buffer(free_line, size=1))
+        with mock.patch.dict(os.environ, {"AOTI_TORCH_ALWAYS_REUSE": "1"}):
+            self.assertTrue(allocate.should_reuse_buffer(free_line, size=1))
 
 
 @requires_gpu()
