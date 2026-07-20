@@ -1,11 +1,14 @@
 # Owner(s): ["module: inductor"]
 
+import os
 import re
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from torch.testing._internal.common_utils import IS_CI, IS_WINDOWS
-from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_GPU, requires_gpu
+from torch.testing._internal.inductor_utils import GPU_TYPE, requires_gpu
 
 
 if IS_WINDOWS and IS_CI:
@@ -20,11 +23,14 @@ import torch
 from torch._C import FileCheck
 from torch._dynamo.utils import same
 from torch._inductor import config
+from torch._inductor.codegen.wrapper import AllocateLine
 from torch._inductor.test_case import run_tests, TestCase
 from torch._inductor.utils import run_and_get_cpp_code
 from torch.export import Dim
 from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
     IS_LINUX,
+    parametrize,
     skipIfRocm,
     TEST_WITH_ROCM,
     TEST_WITH_SLOW,
@@ -37,6 +43,30 @@ except ImportError:
     from test_aot_inductor import (  # @manual=fbcode//caffe2/test/inductor:test_aot_inductor-library
         AOTIRunnerUtil,
     )
+
+
+@instantiate_parametrized_tests
+class TestBufferReusePolicy(TestCase):
+    @parametrize("always_reuse", [None, "0", "1", "true"])
+    def test_aoti_torch_always_reuse(self, always_reuse):
+        allocate = object.__new__(AllocateLine)
+        allocate.comm_buffer = False
+        allocate.scheduler_node_index = 10
+        allocate.wrapper = SimpleNamespace(
+            estimate_peak=SimpleNamespace(
+                overall_peak_memory=100,
+                peak_between=lambda free_line, allocate_line: 100,
+            )
+        )
+        free_line = SimpleNamespace(scheduler_node_index=0)
+
+        with mock.patch.dict(os.environ):
+            os.environ.pop("AOTI_TORCH_ALWAYS_REUSE", None)
+            if always_reuse is not None:
+                os.environ["AOTI_TORCH_ALWAYS_REUSE"] = always_reuse
+            self.assertEqual(
+                allocate.should_reuse_buffer(free_line, size=1), always_reuse == "1"
+            )
 
 
 @requires_gpu()
@@ -210,5 +240,4 @@ class TestMemoryPlanning(TestCase):
 
 
 if __name__ == "__main__":
-    if HAS_GPU:
-        run_tests()
+    run_tests()
