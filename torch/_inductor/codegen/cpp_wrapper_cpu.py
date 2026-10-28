@@ -921,6 +921,43 @@ class CppWrapperCpu(PythonWrapperCodegen):
         else:
             self._write_jit_entry_point_signature(self.prefix)
 
+    def borrowed_input_indices(self) -> OrderedSet[int]:
+        """JIT entry inputs the Python wrapper keeps handles for.
+
+        Static graph inputs (parameters, buffers and tensor attributes of nn
+        modules) and the promoted constants; see
+        config.cpp_wrapper_borrow_static_inputs. Graph inputs are never reused
+        as buffers (WrapperCodeGen.can_reuse), except donated buffers, which
+        are excluded.
+        """
+        if (cached := getattr(self, "_borrowed_input_indices", None)) is not None:
+            return cached
+        borrowed: OrderedSet[int] = OrderedSet()
+        self._borrowed_input_indices = borrowed
+        if (
+            V.graph.aot_mode
+            or V.graph.is_const_graph
+            or not config.cpp_wrapper_fast_entry
+            or not config.cpp_wrapper_borrow_static_inputs
+        ):
+            return borrowed
+        for idx, (name, value) in enumerate(V.graph.graph_inputs.items()):
+            if (
+                idx in V.graph.static_input_idxs
+                and isinstance(value, ir.TensorBox)
+                and not isinstance(
+                    V.graph.graph_inputs_original.get(name), ir.DonatedBuffer
+                )
+            ):
+                borrowed.add(idx)
+        num_inputs = len(V.graph.graph_inputs)
+        borrowed.update(num_inputs + i for i in range(len(V.graph.constants)))
+        return borrowed
+
+    def borrowed_input_names(self) -> OrderedSet[str]:
+        names = [*V.graph.graph_inputs.keys(), *V.graph.constants.keys()]
+        return OrderedSet(names[i] for i in self.borrowed_input_indices())
+
     def _write_input_preamble(self):
         """Emit input stealing and (in JIT mode) GIL release."""
         if V.graph.is_const_graph:
@@ -930,9 +967,21 @@ class CppWrapperCpu(PythonWrapperCodegen):
         jit_num_args = aoti_num_args + len(V.graph.constants)
         # release GIL to support multiple instances inference (in different threads of the same process)
         self.prefix.splice_jit("py::gil_scoped_release_simple release;")
-        self.prefix.splice_jit(
-            f"auto inputs = steal_from_raw_handles_to_raii_handles(input_handles, {jit_num_args});"
-        )
+        if borrowed := self.borrowed_input_indices():
+            mask = ", ".join(
+                "true" if i in borrowed else "false" for i in range(jit_num_args)
+            )
+            self.prefix.splice_jit(
+                f"static constexpr bool input_borrowed[{jit_num_args}] = {{{mask}}};"
+            )
+            self.prefix.splice_jit(
+                "auto inputs = steal_or_borrow_from_raw_handles_to_raii_handles("
+                f"input_handles, {jit_num_args}, input_borrowed);"
+            )
+        else:
+            self.prefix.splice_jit(
+                f"auto inputs = steal_from_raw_handles_to_raii_handles(input_handles, {jit_num_args});"
+            )
         self.prefix.splice_aot(
             f"auto inputs = steal_from_raw_handles_to_raii_handles(input_handles, {aoti_num_args});"
         )
@@ -1549,6 +1598,14 @@ class CppWrapperCpu(PythonWrapperCodegen):
                     self.wrapper_call.writeline(
                         f"output_handles[{idx}] = output_handles[{src_idx}];"
                     )
+                elif output in self.borrowed_input_names():
+                    # The caller owns a borrowed input: return a new handle.
+                    self.wrapper_call.writeline_jit(
+                        f"AOTI_TORCH_ERROR_CODE_CHECK(aoti_torch_new_tensor_handle({output}, &output_handles[{idx}]));"
+                    )
+                    self.wrapper_call.writeline_aot(
+                        f"output_handles[{idx}] = {output}.release();"
+                    )
                 else:
                     self.wrapper_call.writeline(
                         f"output_handles[{idx}] = {output}.release();"
@@ -1627,7 +1684,21 @@ class CppWrapperCpu(PythonWrapperCodegen):
             """
         )
 
-        wrapper_body = "input_tensors = [arg if isinstance(arg, torch.Tensor) else torch.tensor(arg, device='cpu') for arg in args]"
+        # unwrap output tensor back to python scalar
+        if all(x for x in self.output_is_tensor.values()):
+            # If no ShapeAsConstantBuffer in the output, directly return the output as tensors
+            outputs_str = "output_tensors"
+        else:
+            outputs = [
+                (
+                    f"output_tensors[{i}]"
+                    if self.output_is_tensor[i]
+                    else f"output_tensors[{i}].item()"
+                )
+                for i in range(len(V.graph.graph_outputs))
+            ]
+            outputs_str = f"[{', '.join(outputs)}]"
+
         if V.graph.constants:
             # Append constants to the input args for cpp wrapper.
             # Python wrapper directly gets the value inside the wrapper call
@@ -1637,6 +1708,37 @@ class CppWrapperCpu(PythonWrapperCodegen):
                 isinstance(v, torch.Tensor) for v in list(V.graph.constants.values())
             ), "Expect all constants to be Tensor"
             constants_str = f"[{', '.join(V.graph.constants.keys())}]"
+        else:
+            constants_str = None
+
+        if config.cpp_wrapper_fast_entry:
+            # One C++ call converts args, clears it, runs inductor_entry_impl
+            # and steals the outputs; see torch._C._aoti.InductorEntry.
+            borrowed = list(self.borrowed_input_indices())
+            extend = f"args.extend({constants_str})" if constants_str else ""
+            result.splice(
+                f"""
+                def _wrap_func(f):
+                    entry = torch._C._aoti.InductorEntry(
+                        f.__self__.inductor_entry_impl_address(),
+                        {len(V.graph.graph_outputs)},
+                        {borrowed},
+                    )
+
+                    def g(args):
+                        {extend}
+                        output_tensors = entry(args)
+                        return {outputs_str}
+
+                    return g
+
+                call = _wrap_func(inductor_entry)
+                """
+            )
+            return
+
+        wrapper_body = "input_tensors = [arg if isinstance(arg, torch.Tensor) else torch.tensor(arg, device='cpu') for arg in args]"
+        if constants_str:
             wrapper_body += f"""
                     constants_tensor = {constants_str}
                     input_tensors.extend(constants_tensor)
@@ -1652,20 +1754,6 @@ class CppWrapperCpu(PythonWrapperCodegen):
                     del input_tensors
         """
 
-        # unwrap output tensor back to python scalar
-        if all(x for x in self.output_is_tensor.values()):
-            # If no ShapeAsConstantBuffer in the output, directly return the output as tensors
-            outputs_str = "output_tensors"
-        else:
-            outputs = [
-                (
-                    f"output_tensors[{i}]"
-                    if self.output_is_tensor[i]
-                    else f"output_tensors[{i}].item()"
-                )
-                for i in range(len(V.graph.graph_outputs))
-            ]
-            outputs_str = f"[{', '.join(outputs)}]"
         wrapper_body += f"""
                     output_handles = f(input_handles)
                     output_tensors = torch._C._aoti.alloc_tensors_by_stealing_from_void_ptrs(output_handles)

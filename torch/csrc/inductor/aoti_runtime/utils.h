@@ -144,6 +144,16 @@ class RAIIAtenTensorHandle {
   RAIIAtenTensorHandle(AtenTensorHandle handle)
       : handle_(handle, delete_tensor_object) {}
 
+  // Borrow a raw AtenTensorHandle: the caller keeps the ownership, so neither
+  // reset() nor destruction deletes it. release() returns it without the
+  // ownership; never pass a borrowed handle on to a stealing callee.
+  static RAIIAtenTensorHandle borrow(AtenTensorHandle handle) {
+    RAIIAtenTensorHandle result;
+    result.handle_ =
+        std::unique_ptr<AtenTensorOpaque, DeleterFnPtr>(handle, noop_deleter);
+    return result;
+  }
+
   ~RAIIAtenTensorHandle() {
     handle_.reset();
   }
@@ -374,6 +384,26 @@ inline std::vector<RAIIAtenTensorHandle> steal_from_raw_handles_to_raii_handles(
   result.reserve(size);
   for (size_t i = 0; i < size; i++) {
     result.emplace_back(handles[i]);
+    handles[i] = nullptr;
+  }
+  return result;
+}
+
+// Like steal_from_raw_handles_to_raii_handles, but the handles at the
+// positions where borrowed[i] is true stay owned by the caller.
+inline std::vector<RAIIAtenTensorHandle>
+steal_or_borrow_from_raw_handles_to_raii_handles(
+    AtenTensorHandle* handles,
+    size_t size,
+    const bool* borrowed) {
+  std::vector<RAIIAtenTensorHandle> result;
+  result.reserve(size);
+  for (size_t i = 0; i < size; i++) {
+    if (borrowed[i]) {
+      result.push_back(RAIIAtenTensorHandle::borrow(handles[i]));
+    } else {
+      result.emplace_back(handles[i]);
+    }
     handles[i] = nullptr;
   }
   return result;

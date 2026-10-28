@@ -110,6 +110,7 @@ def remove_dupe_metadata(
         subclass_inp_meta=[],
         subclass_fw_graph_out_meta=[],
         subclass_tangent_meta=subclass_tangent_meta,
+        static_input_indices=sorted({add_dupe_map[i] for i in m.static_input_indices}),
     )
 
 
@@ -325,6 +326,16 @@ def create_synthetic_base_metadata(
             subclass_inp_meta=[],
             subclass_fw_graph_out_meta=[],
             subclass_tangent_meta=subclass_tangent_meta,
+            # Static args passed through unchanged stay static; synthetic
+            # bases are rebuilt on every call.
+            static_input_indices=sorted(
+                {
+                    inner_idx
+                    for outer_idx in m.static_input_indices
+                    if isinstance(inner_idx := synthetic_base_info[outer_idx], int)
+                    and inner_args[inner_idx] is outer_args[outer_idx]
+                }
+            ),
         ),
         outer_aliased_arg_idx_with_metadata_mutations,
     )

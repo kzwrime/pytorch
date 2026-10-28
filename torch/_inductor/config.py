@@ -204,6 +204,22 @@ cpp_wrapper_build_separate: bool = (
     os.environ.get("TORCHINDUCTOR_CPP_WRAPPER_BUILD_SEPARATE", "0") == "1"
 )
 
+# JIT cpp_wrapper: the Python wrapper hands its argument list to one C++ call
+# (torch._C._aoti.InductorEntry) that converts it to tensor handles and runs
+# inductor_entry_impl, instead of a list comprehension, a PyCapsule per input
+# and the pybind entry point.
+cpp_wrapper_fast_entry: bool = (
+    os.environ.get("TORCHINDUCTOR_CPP_WRAPPER_FAST_ENTRY", "1") == "1"
+)
+
+# With cpp_wrapper_fast_entry: static inputs (parameters, buffers and tensor
+# attributes of nn modules) are borrowed by the graph, and InductorEntry keeps
+# one handle per such input across calls, renewed whenever a different tensor
+# object is passed, instead of allocating and freeing a handle every call.
+cpp_wrapper_borrow_static_inputs: bool = (
+    os.environ.get("TORCHINDUCTOR_CPP_WRAPPER_BORROW_STATIC_INPUTS", "1") == "1"
+)
+
 fx_wrapper: bool = os.environ.get("TORCHINDUCTOR_FX_WRAPPER", "0") == "1"
 
 # Controls automatic precompiling of common include files for codecache.CppCodeCache

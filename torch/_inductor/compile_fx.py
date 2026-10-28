@@ -1507,6 +1507,7 @@ class _InProcessFxCompile(FxCompile):
                     ),
                     const_module=const_graph,
                     inputs_to_check=inputs_to_check,
+                    static_input_idxs=graph_kwargs.get("static_input_idxs", ()),
                     fx_wrapper=fx_wrapper,
                     get_decomp_fn=get_decomp_fn,
                 )

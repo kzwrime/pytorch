@@ -3903,6 +3903,9 @@ class CppPythonBindingsCodeCache(CppCodeCache):
     entry_function = "kernel"
     call_entry_function = "kernel({}); Py_RETURN_NONE;"
     extra_parse_arg = ""
+    # More module functions: their C++ definitions and py_methods entries.
+    extra_method_defs = ""
+    extra_methods = ""
     suffix_template = textwrap.dedent(
         """
         // Python bindings to call {entry_func}():
@@ -3957,8 +3960,11 @@ class CppPythonBindingsCodeCache(CppCodeCache):
             }}
         }}
 
+        {extra_method_defs}
+
         static PyMethodDef py_methods[] = {{
             {{"{entry_func}", {entry_func}_py, METH_VARARGS, ""}},
+            {extra_methods}
             {{NULL, NULL, 0, NULL}}}};
 
         static struct PyModuleDef py_module =
@@ -4058,6 +4064,8 @@ class CppPythonBindingsCodeCache(CppCodeCache):
             call_entry_func=cls.call_entry_function.format(parseargs),
             entry_func=cls.entry_function,
             extra_parse_arg=cls.extra_parse_arg.format(array_len=num_outputs),
+            extra_method_defs=cls.extra_method_defs,
+            extra_methods=cls.extra_methods,
         )
         get_result = cls.load_async(
             main_code + suffix,
@@ -4098,6 +4106,18 @@ class CppWrapperCodeCache(CppPythonBindingsCodeCache):
     }
     entry_function = "inductor_entry_cpp"
     call_entry_function = "return inductor_entry_cpp({});"
+    # For torch._C._aoti.InductorEntry (config.cpp_wrapper_fast_entry).
+    extra_method_defs = textwrap.dedent(
+        """
+        static PyObject* inductor_entry_impl_address_py(PyObject*, PyObject*) {
+            return PyLong_FromVoidPtr(reinterpret_cast<void*>(&inductor_entry_impl));
+        }
+        """
+    )
+    extra_methods = (
+        '{"inductor_entry_impl_address", inductor_entry_impl_address_py, '
+        'METH_NOARGS, ""},'
+    )
     extra_parse_arg = textwrap.dedent(
         """
         #include <torch/csrc/inductor/aoti_torch/c/shim.h>
